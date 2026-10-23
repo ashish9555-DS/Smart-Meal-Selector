@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { Heart, Plus, X, Search, Clock3, Utensils, ChevronRight, ArrowLeft, Check, Sparkles, SlidersHorizontal, CookingPot, Leaf, Sun, CloudRain, Snowflake, ThermometerSun } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import { Heart, Plus, X, Search, Clock3, Utensils, ChevronRight, ArrowLeft, Check, Sparkles, SlidersHorizontal, CookingPot, Leaf, Sun, CloudRain, Snowflake, ThermometerSun, MapPin, LocateFixed } from 'lucide-react';
 import { Route, Switch } from 'wouter';
 import NotFound from '@/pages/not-found';
 
@@ -26,6 +26,69 @@ const weatherOptions: {id: Weather; label:string; Icon: typeof Sun}[] = [
 ];
 const normalize = (value: string) => value.trim().toLowerCase().replace(/s$/, '');
 
+type Forecast = { location: string; condition: string; high: number; mood: Weather };
+type ForecastResponse = {
+  daily?: {
+    weather_code?: number[];
+    temperature_2m_max?: number[];
+    precipitation_probability_max?: number[];
+  };
+};
+
+function describeWeatherCode(code: number) {
+  if (code === 0) return 'Clear skies';
+  if (code === 1) return 'Mostly clear';
+  if (code === 2) return 'Partly cloudy';
+  if (code === 3) return 'Overcast';
+  if (code === 45 || code === 48) return 'Foggy';
+  if (code >= 51 && code <= 55) return 'Drizzle';
+  if (code >= 56 && code <= 67) return 'Rain';
+  if (code >= 71 && code <= 77) return 'Snow';
+  if (code >= 80 && code <= 82) return 'Rain showers';
+  if (code === 85 || code === 86) return 'Snow showers';
+  if (code >= 95) return 'Thunderstorms';
+  return 'Cloudy';
+}
+
+async function loadForecast(latitude: number, longitude: number, location: string): Promise<Forecast> {
+  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  url.search = new URLSearchParams({
+    latitude: String(latitude),
+    longitude: String(longitude),
+    daily: 'weather_code,temperature_2m_max,precipitation_probability_max',
+    forecast_days: '1',
+    timezone: 'auto',
+  }).toString();
+  const response = await fetch(url);
+  if (!response.ok) throw new Error('We couldn’t load the forecast. Try again or use a weather filter below.');
+
+  const data = await response.json() as ForecastResponse;
+  const code = data.daily?.weather_code?.[0];
+  const high = data.daily?.temperature_2m_max?.[0];
+  const rainChance = data.daily?.precipitation_probability_max?.[0] ?? 0;
+  if (!Number.isFinite(code) || !Number.isFinite(high)) {
+    throw new Error('Today’s forecast isn’t available for that location. Try another city or use a weather filter below.');
+  }
+
+  const weatherCode = Number(code);
+  const highTemperature = Number(high);
+  let mood: Weather;
+  const isSnow = (weatherCode >= 71 && weatherCode <= 77) || weatherCode === 85 || weatherCode === 86;
+  if (isSnow || highTemperature <= 10) {
+    mood = 'cold';
+  } else if ((weatherCode >= 51 && weatherCode <= 67) || (weatherCode >= 80 && weatherCode <= 82) || weatherCode >= 95 || rainChance >= 50) {
+    mood = 'rainy';
+  } else if (highTemperature >= 25) {
+    mood = 'warm';
+  } else if (weatherCode === 0 || weatherCode === 1) {
+    mood = 'sunny';
+  } else {
+    mood = highTemperature >= 18 ? 'warm' : 'cold';
+  }
+
+  return { location, condition: describeWeatherCode(weatherCode), high: highTemperature, mood };
+}
+
 function App() {
   const [ingredients, setIngredients] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('whats-cooking-pantry') || '["tomatoes","garlic","lemon","eggs"]'); } catch { return ['tomatoes','garlic','lemon','eggs']; }
@@ -35,7 +98,11 @@ function App() {
   });
   const [query, setQuery] = useState('');
   const [day, setDay] = useState('Any day');
-  const [weather, setWeather] = useState<Weather | ''>('');
+  const [manualWeather, setManualWeather] = useState<Weather | ''>('');
+  const [city, setCity] = useState('');
+  const [forecast, setForecast] = useState<Forecast | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherError, setWeatherError] = useState('');
   const [showFavorites, setShowFavorites] = useState(false);
   const [selected, setSelected] = useState<Recipe | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -45,6 +112,58 @@ function App() {
   useEffect(() => {
     if (selected) window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [selected]);
+  const weather = manualWeather || forecast?.mood || '';
+  const findForecastForCity = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const search = city.trim();
+    if (!search) {
+      setWeatherError('Enter a city to look up its forecast.');
+      return;
+    }
+    setWeatherLoading(true);
+    setWeatherError('');
+    try {
+      const url = new URL('https://geocoding-api.open-meteo.com/v1/search');
+      url.search = new URLSearchParams({ name: search, count: '1', language: 'en', format: 'json' }).toString();
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('We couldn’t search for that city. Try again or use a weather filter below.');
+      const results = await response.json() as { results?: { name: string; admin1?: string; country?: string; latitude: number; longitude: number }[] };
+      const place = results.results?.[0];
+      if (!place) throw new Error('We couldn’t find that city. Try adding a region or country.');
+      const placeLabel = [place.name, place.admin1, place.country].filter(Boolean).filter((part, index, all) => all.indexOf(part) === index).join(', ');
+      const nextForecast = await loadForecast(place.latitude, place.longitude, placeLabel);
+      setForecast(nextForecast);
+      setManualWeather('');
+    } catch (error) {
+      setWeatherError(error instanceof Error ? error.message : 'Something went wrong while loading the forecast. You can still use a weather filter below.');
+    } finally {
+      setWeatherLoading(false);
+    }
+  };
+  const useMyLocation = () => {
+    setWeatherError('');
+    if (!navigator.geolocation) {
+      setWeatherError('Location sharing isn’t available in this browser. Search for a city or choose a weather filter below.');
+      return;
+    }
+    setWeatherLoading(true);
+    navigator.geolocation.getCurrentPosition(async ({ coords }) => {
+      try {
+        const nextForecast = await loadForecast(coords.latitude, coords.longitude, 'Your location');
+        setForecast(nextForecast);
+        setManualWeather('');
+      } catch (error) {
+        setWeatherError(error instanceof Error ? error.message : 'We couldn’t load the forecast. Search for a city or use a weather filter below.');
+      } finally {
+        setWeatherLoading(false);
+      }
+    }, (error) => {
+      setWeatherLoading(false);
+      setWeatherError(error.code === error.PERMISSION_DENIED
+        ? 'Location access was declined. Search for a city or choose a weather filter below.'
+        : 'We couldn’t get your location. Search for a city or choose a weather filter below.');
+    }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 1800000 });
+  };
   const addIngredient = (name: string) => {
     const clean = name.trim().toLowerCase();
     if (clean && !ingredients.some((item) => normalize(item) === normalize(clean))) setIngredients((current) => [...current, clean]);
@@ -98,13 +217,27 @@ function App() {
               <div><div className="section-kicker"><span>02</span><span>{showFavorites ? 'YOUR LITTLE RECIPE BOX' : 'A GOOD PLACE TO START'}</span><span className="kicker-rule"/></div><h2>{showFavorites ? <>Saved with <em>love.</em></> : <>Tonight, <em>sorted.</em></>}</h2><p className="results-sub">{showFavorites ? 'The recipes you’ve tucked away for later.' : 'Matched to your kitchen, ranked by what you’ve got.'}</p></div>
               <div className="result-count"><strong>{ranked.length.toString().padStart(2,'0')}</strong><span>{ranked.length===1?'RECIPE':'RECIPES'}<br/>TO TRY</span></div>
             </div>
+            <section className="weather-tools" aria-label="Local forecast suggestions">
+              <div className="weather-tools-main">
+                <div className="weather-tool-heading"><span className="weather-tool-icon"><CloudRain size={17}/></span><div><p>COOK WITH THE WEATHER</p><span>Use today’s forecast to tune your recipe ideas.</span></div></div>
+                <div className="weather-location-actions">
+                  <form onSubmit={findForecastForCity} className="city-search"><MapPin size={15}/><input value={city} onChange={(event)=>setCity(event.target.value)} placeholder="Enter a city" aria-label="Enter a city for the forecast" data-testid="input-weather-city"/><button type="submit" disabled={weatherLoading} data-testid="button-weather-city">{weatherLoading?'Loading…':'Find city'}</button></form>
+                  <button type="button" className="location-button" onClick={useMyLocation} disabled={weatherLoading} data-testid="button-use-location"><LocateFixed size={14}/>{weatherLoading?'Loading…':'Use my location'}</button>
+                </div>
+              </div>
+              {forecast ? <div className="weather-status" aria-live="polite" data-testid="status-weather-forecast">
+                <span className="forecast-details"><span className="forecast-pin"><MapPin size={13}/></span><span><strong>{forecast.location}</strong> · {forecast.condition} · high {Math.round(forecast.high)}°C</span><span className="forecast-mood">Forecast mood: {weatherOptions.find((option)=>option.id===forecast.mood)?.label}</span>{manualWeather && <span className="forecast-mood manual-mood">Manual filter: {weatherOptions.find((option)=>option.id===manualWeather)?.label}</span>}</span>
+                <div className="forecast-actions">{manualWeather && <button type="button" onClick={()=>setManualWeather('')} data-testid="button-use-forecast">Use forecast mood</button>}<button type="button" onClick={()=>setForecast(null)} data-testid="button-clear-forecast">Clear forecast</button></div>
+              </div> : <p className="weather-hint">Location is optional. Manual weather filters are always available below.</p>}
+              {weatherError && <p className="weather-error" role="alert" data-testid="status-weather-error">{weatherError}</p>}
+            </section>
             <div className="filters">
               <label className="day-select"><SlidersHorizontal size={15}/><select value={day} onChange={(e)=>setDay(e.target.value)} aria-label="Filter by day" data-testid="select-day">{dayOptions.map((option)=><option key={option}>{option}</option>)}</select></label>
               <span className="filter-divider"/>
-              <div className="weather-filters" aria-label="Filter by weather mood">{weatherOptions.map(({id,label,Icon})=><button key={id} className={weather===id?'selected':''} onClick={()=>setWeather(weather===id?'':id)} aria-pressed={weather===id} data-testid={`filter-${id}`}><Icon size={14}/><span>{label}</span></button>)}</div>
+              <div className="weather-filters" aria-label="Filter by weather mood">{weatherOptions.map(({id,label,Icon})=><button key={id} className={weather===id?'selected':''} onClick={()=>setManualWeather(manualWeather===id?'':id)} aria-pressed={weather===id} data-testid={`filter-${id}`}><Icon size={14}/><span>{label}</span></button>)}</div>
             </div>
             {ranked.length ? <div className="recipe-grid">{ranked.map(({recipe,matches},index)=><RecipeCard key={recipe.id} recipe={recipe} matches={matches} favorite={favorites.includes(recipe.id)} onFavorite={()=>toggleFavorite(recipe.id)} onOpen={()=>setSelected(recipe)} index={index}/>)}</div> :
-              <div className="empty-state"><div className="empty-illustration"><CookingPot size={34}/><span>?</span></div><p className="empty-eyebrow">{showFavorites ? 'NOT TUCKED AWAY YET' : 'A QUIET LITTLE KITCHEN'}</p><h3>{showFavorites ? 'No saved recipes, just yet.' : ingredients.length ? 'Nothing quite clicks.' : 'Let’s find your first meal.'}</h3><p>{showFavorites ? 'Tap the heart on a recipe to keep it close.' : ingredients.length ? 'Try another filter or add a couple more things from your kitchen.' : 'Add a few ingredients above, and we’ll find something lovely.'}</p>{showFavorites ? <button onClick={()=>setShowFavorites(false)} className="text-action">Back to suggestions <ChevronRight size={15}/></button> : <button onClick={()=>{setDay('Any day');setWeather('');setIngredients(['eggs','spinach','garlic'])}} className="text-action">Try eggs, spinach & garlic <ChevronRight size={15}/></button>}</div>
+              <div className="empty-state"><div className="empty-illustration"><CookingPot size={34}/><span>?</span></div><p className="empty-eyebrow">{showFavorites ? 'NOT TUCKED AWAY YET' : 'A QUIET LITTLE KITCHEN'}</p><h3>{showFavorites ? 'No saved recipes, just yet.' : ingredients.length ? 'Nothing quite clicks.' : 'Let’s find your first meal.'}</h3><p>{showFavorites ? 'Tap the heart on a recipe to keep it close.' : ingredients.length ? 'Try another filter or add a couple more things from your kitchen.' : 'Add a few ingredients above, and we’ll find something lovely.'}</p>{showFavorites ? <button onClick={()=>setShowFavorites(false)} className="text-action">Back to suggestions <ChevronRight size={15}/></button> : <button onClick={()=>{setDay('Any day');setManualWeather('');setForecast(null);setIngredients(['eggs','spinach','garlic'])}} className="text-action">Try eggs, spinach & garlic <ChevronRight size={15}/></button>}</div>
             }
             <div className="results-endnote"><span className="tiny-star">✳</span><span>Cook with curiosity. Use what you have. Make it yours.</span><span className="tiny-star">✳</span></div>
           </section>
