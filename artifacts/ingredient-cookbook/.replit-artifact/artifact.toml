@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "What's Cooking?"
+description = "A cooking suggestion website that helps home cooks find recipes from ingredients they already have and browse ideas suited to the day or weather."
+version = "1.0.0"
+id = "artifacts/ingredient-cookbook"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24971
+
+[services.development]
+run = "pnpm --filter @workspace/ingredient-cookbook run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/ingredient-cookbook", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/ingredient-cookbook/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24971"
+BASE_PATH = "/"
